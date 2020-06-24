@@ -1,0 +1,83 @@
+#!/usr/bin/perl
+use strict;
+use Getopt::Long;
+use JSON;
+use LWP::Simple;
+use LWP::UserAgent;
+
+my $CONF = "/etc/crt-watcher.conf";
+GetOptions("conf=s" => \$CONF);
+
+my $slack_chan = "";
+my $slack_hook = "";
+my $print_cache_dir = "/var/tmp/";
+my @domains = qw//;
+my $hostname = `hostname -f`;
+
+open(C, "$CONF");
+while (<C>) {
+    if (/slack_chan=(.*)/) { $slack_chan = $1; }
+    if (/slack_hook=(.*)/) { $slack_hook = $1; }
+    if (/print_cache_dir=(.*)/) { $print_cache_dir = $1; }
+    if (/domain=(.*)/) {
+        push(@domains, $1);
+    }
+}
+close(C);
+
+my $output = "";
+
+#$output = "blah blah\n foo foo\n"; @domains = qw//; #DBG
+
+foreach my $d (@domains) {
+    my $url = "https://crt.sh/?q=$d";
+    print "Checking $d\n";
+    my $txt = get($url);
+    my $inRecords = 0;
+    my $newestRecord = 0;
+    my $printFrom = 0;
+    if (-e "$print_cache_dir/.$d.crtcache") { open(F, "$print_cache_dir/.$d.crtcache"); while (<F>) { if (/([0-9]*)/) { $printFrom = $1; } }; close(F); }
+#    $printFrom = "2404943694"; #DBG
+
+    my $id = ""; my $logged = ""; my $before = ""; my $after = ""; my $certs = ""; my $ca = "";
+
+    foreach (split(/\n/, $txt)) {
+        if (/<TH class=.outer..Certificates/) {
+            $inRecords = 1;
+        }
+        if ($inRecords == 1) { if (/A href=..id=([0-9]+)">/) { $id = $1; $inRecords = 2; next; } }
+        if ($inRecords == 2) { if (/TD [^>]*>(.*)</) { $logged = $1; $inRecords = 3; next; } }
+        if ($inRecords == 3) { if (/TD [^>]*>(.*)</) { $before = $1; $inRecords = 4; next; } }
+        if ($inRecords == 4) { if (/TD [^>]*>(.*)</) { $after = $1; $inRecords = 5; next; } }
+        if ($inRecords == 5) { if (/TD[^>]*>(.*)<.TD/) { $certs = $1; $inRecords = 6; next; } }
+        if ($inRecords == 6) { if (/caid=[^>]*>(.*)</) { $ca = $1; $inRecords = 99; next; } }
+        if ($inRecords == 99) {
+            if ($id > $newestRecord) {
+                $newestRecord = $id;
+            }
+            $certs =~ s/<BR>/, /g;
+            $inRecords = 1;
+            if ($id > $printFrom) {
+                $output .= "Certificate $id: $logged/$before/$after. New certificate from $ca for $certs\n";
+            }
+        }
+    }
+    open(F, ">$print_cache_dir/.$d.crtcache"); print F $newestRecord; close(F);
+}
+
+
+if ($output =~ /../) {
+    my $ua = LWP::UserAgent->new();
+    my $obj = {};
+    $obj->{channel} = $slack_chan;
+    $obj->{username} = "CRT monitor running on $hostname";;
+    $obj->{text} = $output;
+    $obj->{icon_emoji} = ":lock:";
+    my $json = encode_json($obj);
+    print $json;
+    my $r = $ua->post( $slack_hook, [ 'payload' => $json ] );
+    print $output;
+    print $r->as_string;
+} else {
+    print "Nothing to output";
+}
